@@ -1,5 +1,6 @@
 📌 TikTok Psikolojik Risk Analizi Sistemi
 TikTok Videolarından Otomatik Transcript Çıkarma, Sentiment Analizi ve Psikolojik Risk Skoru Üretme
+
 🧠 Projenin Amacı
 Bu proje, TikTok üzerindeki videolardan elde edilen metinsel içerikleri (caption/transcript) otomatik olarak analiz ederek psikolojik risk içeren davranışları erken tespit etmeyi amaçlayan bir NLP ve veri işleme sistemidir.
 Projenin hedefleri:
@@ -8,6 +9,7 @@ RoBERTa tabanlı sentiment analizi ile duygu skorlarını çıkarmak
 Risk anahtar kelimelerini tarayarak risk skoru hesaplamak
 Analiz edilen sonuçları CSV olarak kaydetmek
 Dashboard üzerinden sonuçları görselleştirmek
+
 🚀 Sistem Mimarisi
 1. TikTok Scraper (Playwright)
 Scraper şu işlemleri yapar:
