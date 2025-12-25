@@ -16,3 +16,12 @@ playwright/driver/
 *.zip
 *.bin
 *.pth
+.DS_Store
+
+# generated media
+current_audio.mp3
+current_video.mp4
+
+# outputs
+*.csv
+/tiktok_results/

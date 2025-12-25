@@ -1,6 +1,5 @@
 import sys
 import locale
-# ==== UTF-8 ZORLAMASI  ====
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 locale.getpreferredencoding = lambda: "UTF-8"
@@ -13,17 +12,19 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import numpy as np
 import requests
-import json
 from moviepy.editor import VideoFileClip
 from faster_whisper import WhisperModel
 import os
+import cv2
+import mediapipe as mp
+from deepface import DeepFace
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-# ========================
-# SENTIMENT MODEL
-# ========================
+# ===========================
+# SENTIMENT MODEL (caption)
+# ===========================
 tokenizer = AutoTokenizer.from_pretrained("cardiffnlp/twitter-roberta-base-sentiment")
 model = AutoModelForSequenceClassification.from_pretrained("cardiffnlp/twitter-roberta-base-sentiment")
 
@@ -41,9 +42,9 @@ def get_sentiment(text: str):
     return pred, float(probs[0]), float(probs[1]), float(probs[2])
 
 
-# ========================
+# ===========================
 # RISK METRİKLERİ
-# ========================
+# ===========================
 RISK_KEYWORDS = [
     "kill myself", "kys", "suicide", "end it all", "cutting", "self harm",
     "self-harm", "depressed", "depression", "worthless", "i wanna die",
@@ -91,11 +92,7 @@ def engagement_risk(like_count: int, comment_count: int) -> float:
     return max(0.0, min(1.0, score))
 
 
-def compute_risk_score(caption: str,
-                       neg: float,
-                       like_str: str,
-                       comment_str: str,
-                       hashtag: str) -> float:
+def compute_risk_score(caption: str, neg: float, like_str: str, comment_str: str, hashtag: str) -> float:
     kw_score = keyword_risk(caption)
     likes = parse_count(like_str)
     comments = parse_count(comment_str)
@@ -115,9 +112,9 @@ def compute_risk_score(caption: str,
     return round(raw * 100, 2)
 
 
-# ========================
-# VIDEO DOWNLOAD (FALLBACK)
-# ========================
+# ===========================
+# VIDEO DOWNLOAD
+# ===========================
 def download_video(video_url, out="current_video.mp4"):
 
     fallback_urls = [
@@ -131,7 +128,7 @@ def download_video(video_url, out="current_video.mp4"):
 
     for fb in fallback_urls:
         try:
-            print(f"⬇️ Fallback deniyor: {fb}")
+            print(f" Fallback deniyor: {fb}")
             r = requests.get(fb, headers=headers, timeout=20, stream=True)
 
             if "application/json" in r.headers.get("Content-Type", ""):
@@ -148,7 +145,7 @@ def download_video(video_url, out="current_video.mp4"):
                     for chunk in r.iter_content(1024 * 64):
                         if chunk:
                             f.write(chunk)
-                print("✅ Video indirildi:", out)
+                print(" Video indirildi:", out)
                 return out
 
         except Exception as e:
@@ -158,51 +155,29 @@ def download_video(video_url, out="current_video.mp4"):
     return None
 
 
-# ========================
-# BASİT RULE-BASED SUMMARY
-# ========================
-def simple_summary(text: str, max_sentences: int = 3, max_chars: int = 300):
-    if not text:
-        return ""
-
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    sentences = [s for s in sentences if s.strip()]
-
-    if not sentences:
-        return text[:max_chars]
-
-    summary = " ".join(sentences[:max_sentences])
-    if len(summary) > max_chars:
-        summary = summary[:max_chars] + "..."
-    return summary
-
-
-# ========================
-# TRANSCRIPT + SUMMARY FIXED (UTF-8 SAFE)
-# ========================
+# ===========================
+# TRANSCRIPT ÇIKAR
+# ===========================
 def extract_transcript_and_summary(video_path):
     transcript = ""
     summary = ""
     try:
         audio_path = "current_audio.mp3"
-        print("🎧 Ses çıkarılıyor...")
+        print(" Ses çıkarılıyor...")
         clip = VideoFileClip(video_path)
         clip.audio.write_audiofile(audio_path, logger=None, verbose=False)
 
-        print("🧠 Faster-Whisper transcript alınıyor...")
+        print(" Faster-Whisper transcript alınıyor...")
         model = WhisperModel("small", device="cpu", compute_type="int8")
         segments, _ = model.transcribe(audio_path)
 
-        # === EN ÖNEMLİ KISIM: UTF-8 SAFE JOIN ===
         pieces = []
         for seg in segments:
             safe = seg.text.encode("utf-8", "ignore").decode("utf-8", "ignore")
             pieces.append(safe)
         transcript = " ".join(pieces).strip()
 
-        # GPT yok → basit özet
-        print("📝 Basit özet oluşturuluyor...")
-        summary = simple_summary(transcript)
+        summary = transcript[:300]
 
     except Exception as e:
         print("[!] Transcript/Summary hatası:", e)
@@ -210,24 +185,126 @@ def extract_transcript_and_summary(video_path):
     return transcript, summary
 
 
-# ========================
+# ===========================
+# VIDEO EMOTION ANALYSIS
+# ===========================
+try:
+    mp_face = mp.solutions.face_detection
+except AttributeError:
+    mp_face = None
+
+
+
+def video_emotion_analysis(video_path):
+    """Hem yüz varsa mimik analizi, yoksa atmosfer analizi yapar."""
+
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    if not ret:
+        return {}, {}
+
+    # --- Yüz kontrolü ---
+    has_face = False
+    if mp_face is not None:
+      with mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5) as fd:
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        det = fd.process(rgb)
+        if det.detections:
+            has_face = True
+
+    cap.release()
+
+    # -------------------------
+    # 1) Yüz varsa → DeepFace
+    # -------------------------
+    if has_face:
+        try:
+            analysis = DeepFace.analyze(frame, actions=["emotion"], enforce_detection=False)
+            if isinstance(analysis, list):
+                analysis = analysis[0]
+
+            emo = analysis["emotion"]
+            dominant = analysis["dominant_emotion"]
+
+            return {
+                "face_detected": True,
+                "face_emotion": dominant,
+                "face_emotion_score": float(emo.get(dominant, 0.0))
+            }, {}
+        except:
+            pass
+
+    # -------------------------
+    # 2) Yüz yoksa → Atmosfer
+    # -------------------------
+    cap = cv2.VideoCapture(video_path)
+    blur_list, bright_list, motion_list = [], [], []
+
+    ret, prev_frame = cap.read()
+    prev_g = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        blur_list.append(cv2.Laplacian(g, cv2.CV_64F).var())
+        bright_list.append(np.mean(g))
+        motion_list.append(np.mean(cv2.absdiff(prev_g, g)))
+
+        prev_g = g
+
+    cap.release()
+
+    blur = float(np.mean(blur_list))
+    bright = float(np.mean(bright_list))
+    motion = float(np.mean(motion_list))
+
+    # Atmosfer-duygu skorları
+    sad = (1 - bright / 255) * 0.6 + (blur < 20) * 0.4
+    happy = (bright / 255)
+    angry = motion / 50
+    calm = 1 - angry
+
+    total = happy + sad + angry + calm
+    happy /= total
+    sad /= total
+    angry /= total
+    calm /= total
+
+    return {
+        "face_detected": False,
+        "face_emotion": None,
+        "face_emotion_score": 0.0
+    }, {
+        "visual_happy": float(happy),
+        "visual_sad": float(sad),
+        "visual_angry": float(angry),
+        "visual_calm": float(calm),
+        "visual_blur": blur,
+        "visual_brightness": bright,
+        "visual_motion": motion
+    }
+
+
+# ===========================
 # ANA SCRAPER
-# ========================
+# ===========================
 def scrape_tiktok_hashtags(hashtags, limit=3):
     all_data = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir="/Users/aliturhan/tiktok_profile",
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ]
+        browser = p.chromium.launch(
+            headless=False, channel="chrome",
+            args=["--disable-blink-features=AutomationControlled",
+                  "--disable-infobars", "--no-sandbox",
+                  "--disable-dev-shm-usage"]
         )
-        page = browser.new_page()
+        context = browser.new_context()
+        page = context.new_page()
 
         for tag in hashtags:
             url = f"https://www.tiktok.com/tag/{tag}"
@@ -235,8 +312,7 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
 
             try:
                 page.goto(url, timeout=180000, wait_until="domcontentloaded")
-            except PlayTimeout:
-                print("[!] İlk goto timeout → load ile tekrar")
+            except:
                 page.goto(url, timeout=180000, wait_until="load")
 
             input("👉 Doğrulama varsa çöz → Enter\n")
@@ -251,7 +327,7 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                     break
                 last_height = new_height
 
-            print("🎥 Video linkleri alınıyor...")
+            print(" Video linkleri alınıyor...")
             cards = page.locator("a[href*='/video/']")
             try:
                 href_list = cards.evaluate_all("els => els.map(e => e.href)")
@@ -259,7 +335,7 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                 href_list = []
 
             href_list = list(dict.fromkeys(href_list))
-            print(f"➡️ {len(href_list)} link bulundu (#{tag})")
+            print(f"{len(href_list)} link bulundu (#{tag})")
 
             href_list = href_list[:limit]
 
@@ -273,6 +349,7 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                     print("❌ Video açılmadı")
                     continue
 
+                # Caption
                 caption = ""
                 for sel in [
                     'div[data-e2e="browse-video-desc"]',
@@ -299,24 +376,26 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                     pass
 
                 sent_label, neg, neu, pos = get_sentiment(caption)
+                risk_yuzdesi = compute_risk_score(caption, neg, like_text, comment_text, tag)
 
-                risk_yuzdesi = compute_risk_score(
-                    caption=caption,
-                    neg=neg,
-                    like_str=like_text,
-                    comment_str=comment_text,
-                    hashtag=tag
-                )
-
-
+                # ---- VIDEO INDIR ----
                 video_path = download_video(video_url)
 
+                # ---- YENİ: VIDEO EMOTION ANALYSIS ----
+                face_info = {}
+                visual_info = {}
+
                 if video_path:
+                    print("🎥 Video duygu analizi yapılıyor...")
+                    face_info, visual_info = video_emotion_analysis(video_path)
+
+                    print("🎙 Transcript alınıyor...")
                     transcript, summary = extract_transcript_and_summary(video_path)
                 else:
                     transcript, summary = "", ""
 
-                all_data.append({
+                # VERIYI BİRLEŞTİR
+                row = {
                     "hashtag": tag,
                     "caption": temizle(caption),
                     "like_raw": like_text,
@@ -328,17 +407,23 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                     "risk_yuzdesi": risk_yuzdesi,
                     "transcript": transcript,
                     "summary": summary,
-                    "video_url": video_url
-                })
+                    "video_url": video_url,
+                }
+
+                # Video emotion kolonları ekle
+                row.update(face_info)
+                row.update(visual_info)
+
+                all_data.append(row)
 
         browser.close()
 
     return pd.DataFrame(all_data)
 
 
-# ========================
+# ===========================
 # RUN
-# ========================
+# ===========================
 if __name__ == "__main__":
     hashtags = ["depression", "anxiety", "suicide"]
     df = scrape_tiktok_hashtags(hashtags, limit=3)
