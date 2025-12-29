@@ -194,7 +194,6 @@ except AttributeError:
     mp_face = None
 
 
-
 def video_emotion_analysis(video_path):
     """Hem yüz varsa mimik analizi, yoksa atmosfer analizi yapar."""
 
@@ -206,12 +205,11 @@ def video_emotion_analysis(video_path):
     # --- Yüz kontrolü ---
     has_face = False
     if mp_face is not None:
-      with mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5) as fd:
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        det = fd.process(rgb)
-        if det.detections:
-            has_face = True
+        with mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5) as fd:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            det = fd.process(rgb)
+            if det.detections:
+                has_face = True
 
     cap.release()
 
@@ -242,6 +240,10 @@ def video_emotion_analysis(video_path):
     blur_list, bright_list, motion_list = [], [], []
 
     ret, prev_frame = cap.read()
+    if not ret:
+        cap.release()
+        return {"face_detected": False, "face_emotion": None, "face_emotion_score": 0.0}, {}
+
     prev_g = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
 
     while True:
@@ -259,17 +261,19 @@ def video_emotion_analysis(video_path):
 
     cap.release()
 
-    blur = float(np.mean(blur_list))
-    bright = float(np.mean(bright_list))
-    motion = float(np.mean(motion_list))
+    blur = float(np.mean(blur_list)) if blur_list else 0.0
+    bright = float(np.mean(bright_list)) if bright_list else 0.0
+    motion = float(np.mean(motion_list)) if motion_list else 0.0
 
     # Atmosfer-duygu skorları
     sad = (1 - bright / 255) * 0.6 + (blur < 20) * 0.4
-    happy = (bright / 255)
-    angry = motion / 50
+    happy = (bright / 255) if bright > 0 else 0.0
+    angry = motion / 50 if motion > 0 else 0.0
     calm = 1 - angry
 
     total = happy + sad + angry + calm
+    if total <= 0:
+        total = 1.0
     happy /= total
     sad /= total
     angry /= total
@@ -349,18 +353,64 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                     print("❌ Video açılmadı")
                     continue
 
-                # Caption
+                # ===========================
+                # Caption (FIXED)
+                # ===========================
                 caption = ""
+
+                # 1) Caption container gelene kadar bekle
+                for sel in [
+                    '[data-e2e="browse-video-desc"]',
+                    '[data-e2e="video-desc"]',
+                    'h1[data-e2e="browse-video-desc"]',
+                    'h1[data-e2e="video-desc"]'
+                ]:
+                    try:
+                        page.locator(sel).first.wait_for(timeout=15000)  # 15 sn bekle
+                        break
+                    except:
+                        pass
+
+                # 2) "See more / Daha fazla" varsa tıkla
+                for more_sel in [
+                    'button[data-e2e="video-desc-expand"]',
+                    'button:has-text("more")',
+                    'button:has-text("See more")',
+                    'button:has-text("Daha fazla")',
+                    'span:has-text("more")',
+                    'span:has-text("See more")',
+                    'span:has-text("Daha fazla")'
+                ]:
+                    try:
+                        loc = page.locator(more_sel).first
+                        if loc.count() > 0 and loc.is_visible():
+                            loc.click(timeout=1000)
+                            time.sleep(0.5)
+                            break
+                    except:
+                        pass
+
+                # 3) Caption'ı al (text_content daha stabil)
                 for sel in [
                     'div[data-e2e="browse-video-desc"]',
+                    'h1[data-e2e="browse-video-desc"]',
+                    'div[data-e2e="video-desc"]',
                     'h1[data-e2e="video-desc"]',
                     'span[data-e2e="video-desc"]'
                 ]:
                     try:
-                        txt = page.locator(sel).inner_text(timeout=1000)
-                        if txt.strip():
+                        txt = page.locator(sel).first.text_content(timeout=5000)
+                        if txt and txt.strip():
                             caption = txt.strip()
                             break
+                    except:
+                        pass
+
+                # 4) Hâlâ boşsa: meta description fallback
+                if not caption:
+                    try:
+                        caption = page.locator('meta[name="description"]').get_attribute("content") or ""
+                        caption = caption.strip()
                     except:
                         pass
 
@@ -381,7 +431,7 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                 # ---- VIDEO INDIR ----
                 video_path = download_video(video_url)
 
-                # ---- YENİ: VIDEO EMOTION ANALYSIS ----
+                # ---- VIDEO EMOTION ANALYSIS ----
                 face_info = {}
                 visual_info = {}
 
@@ -394,7 +444,6 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                 else:
                     transcript, summary = "", ""
 
-                # VERIYI BİRLEŞTİR
                 row = {
                     "hashtag": tag,
                     "caption": temizle(caption),
@@ -410,7 +459,6 @@ def scrape_tiktok_hashtags(hashtags, limit=3):
                     "video_url": video_url,
                 }
 
-                # Video emotion kolonları ekle
                 row.update(face_info)
                 row.update(visual_info)
 
