@@ -25,3 +25,8 @@ current_video.mp4
 # outputs
 *.csv
 /tiktok_results/
+current_audio 2.mp3
+current_video 2.mp4
+
+current_audio*.mp3
+current_video*.mp4
